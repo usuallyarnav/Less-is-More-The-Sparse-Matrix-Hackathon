@@ -6,6 +6,46 @@ Instead of the expected array-of-triplets or linked list solution, this implemen
 
 ---
 
+## What Was Given vs What Was Built
+
+The assignment came with starter code. Here's exactly what was pre-provided and what was written from scratch:
+
+### Pre-provided (Starter Code)
+
+**`sparse_utils.h`** — basic header with just two constants and the dense matrix declaration:
+```c
+#define MAX_LINES 10
+#define MAX_WORDS 100
+extern int matrix[MAX_LINES][MAX_WORDS]; // the naive 4,000-byte grid
+```
+
+**`sparse_utils.c`** — text data, dictionary helpers, and a `buildMatrix()` that populated the full dense matrix:
+```c
+// filled the entire 10×100 int matrix, zeros and all
+void buildMatrix() { ... matrix[i][col]++; ... }
+```
+
+**`main.c`** — a `printAll()` that read directly from `matrix[i][j]` and a simple `main()` calling `buildMatrix()` then `printAll()`. No memory optimisation whatsoever.
+
+### Built From Scratch
+
+Everything related to compression is original work:
+
+| What | Where |
+|---|---|
+| `bitmapSize` constant + `bitmap[125]` array | `sparse_utils.h` |
+| `sparseValues` dynamic pointer + `nonZeroCount` | `sparse_utils.h` |
+| `SET_BIT` / `GET_BIT` macros | `sparse_utils.h` |
+| `compressMatrix()` — scans grid, allocates exact vault, fills bitmap, frees grid | `sparse_utils.c` |
+| `getSparseValue(r, c)` — bitmap lookup + rank query for retrieval | `sparse_utils.c` |
+| `freeSparseData()` — dynamic memory cleanup | `sparse_utils.c` |
+| Reworked `buildMatrix()` — now uses `calloc` temp grid + calls `compressMatrix()` | `sparse_utils.c` |
+| Reworked `main.c` — reads via `getSparseValue()` instead of `matrix[i][j]`, prints memory stats | `main.c` |
+
+In short: the starter code handed you a naive dense matrix and said "make this better." Everything you see in the final solution that isn't the raw text data or the dictionary helpers (`findWord`, `addWord`) was designed and written as the solution.
+
+---
+
 ## The Problem
 
 In Natural Language Processing (and many other domains), matrices are naturally sparse. When you build a word-frequency matrix from sentences, each sentence only uses a handful of words out of the entire vocabulary. Storing every zero wastes enormous amounts of memory.
