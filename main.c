@@ -29,11 +29,15 @@ void printAll()
         printf("\n");
     }
 
+    // bitmapSize is 125 cus its built for MAX_WORDS=100, but we only ever get 33 real words.
+    // so 67 columns of bitmap are just... sitting there doing nothing. counting what we ACTUALLY use.
+    int usedBitmapBytes = (lineCount * wordCount + 7) / 8; // +7 so it rounds up, cant have half a byte lol
+
     printf("\n                 Memory usage                  \n");
-    printf("Orignal size : %d  bytes\n", (MAX_LINES * MAX_WORDS * sizeof(int))); // I wanted to use lu cause well the sizeee iss too biggggggggg lmfao
-    printf("bitmap takes size :    %d bytes\n", bitmapSize);
-    printf("The :    %d bytes (0 waste)\n", nonZeroCount);
-    printf("Total Memory Used:     %d bytes\n", bitmapSize + nonZeroCount);
+    printf("Orignal size : %lu  bytes\n", (unsigned long)(MAX_LINES * MAX_WORDS * sizeof(int))); // finally used lu, the warning was annoying me
+    printf("bitmap takes size :    %d bytes\n", usedBitmapBytes);
+    printf("The vault :    %d bytes (0 waste)\n", nonZeroCount);
+    printf("Total Memory Used:     %d bytes\n", usedBitmapBytes + nonZeroCount);
 }
 
 int main()
