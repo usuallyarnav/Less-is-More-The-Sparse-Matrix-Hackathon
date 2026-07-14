@@ -1,241 +1,260 @@
-# Less is More: The Sparse Matrix Hackathon
+# Less is More — A Bitmap-Indexed Sparse Matrix in C
 
-> A DSA course assignment that went a little too far — in the best way possible.
+> **4,000 bytes → 185 bytes.** No row indices. No column indices. No pointers.
+> Just a bitmap and a byte-packed vault.
 
-Instead of the expected array-of-triplets or linked list solution, this implementation uses a **bitmap index + dynamically allocated value vault** to represent a sparse matrix. The result: a 10×100 word-frequency matrix stored in roughly **185 bytes** instead of the naive **4,000 bytes** — a ~95% reduction.
-
----
-
-## What Was Given vs What Was Built
-
-The assignment came with starter code. Here's exactly what was pre-provided and what was written from scratch:
-
-### Pre-provided (Starter Code)
-
-**`sparse_utils.h`** — basic header with just two constants and the dense matrix declaration:
-```c
-#define MAX_LINES 10
-#define MAX_WORDS 100
-extern int matrix[MAX_LINES][MAX_WORDS]; // the naive 4,000-byte grid
-```
-
-**`sparse_utils.c`** — text data, dictionary helpers, and a `buildMatrix()` that populated the full dense matrix:
-```c
-// filled the entire 10×100 int matrix, zeros and all
-void buildMatrix() { ... matrix[i][col]++; ... }
-```
-
-**`main.c`** — a `printAll()` that read directly from `matrix[i][j]` and a simple `main()` calling `buildMatrix()` then `printAll()`. No memory optimisation whatsoever.
-
-### Built From Scratch
-
-Everything related to compression is original work:
-
-| What | Where |
-|---|---|
-| `bitmapSize` constant + `bitmap[125]` array | `sparse_utils.h` |
-| `sparseValues` dynamic pointer + `nonZeroCount` | `sparse_utils.h` |
-| `SET_BIT` / `GET_BIT` macros | `sparse_utils.h` |
-| `compressMatrix()` — scans grid, allocates exact vault, fills bitmap, frees grid | `sparse_utils.c` |
-| `getSparseValue(r, c)` — bitmap lookup + rank query for retrieval | `sparse_utils.c` |
-| `freeSparseData()` — dynamic memory cleanup | `sparse_utils.c` |
-| Reworked `buildMatrix()` — now uses `calloc` temp grid + calls `compressMatrix()` | `sparse_utils.c` |
-| Reworked `main.c` — reads via `getSparseValue()` instead of `matrix[i][j]`, prints memory stats | `main.c` |
-
-In short: the starter code handed you a naive dense matrix and said "make this better." Everything you see in the final solution that isn't the raw text data or the dictionary helpers (`findWord`, `addWord`) was designed and written as the solution.
+A university DSA assignment asked for a sparse matrix using triplet arrays or linked lists. This is neither. It stores a 10×100 NLP word-frequency matrix using a **presence bitmap plus a rank-indexed value vault** — the same core idea that powers Apache Arrow, Apache Parquet, and Roaring Bitmap.
 
 ---
 
-## The Problem
+## The Headline
 
-In Natural Language Processing (and many other domains), matrices are naturally sparse. When you build a word-frequency matrix from sentences, each sentence only uses a handful of words out of the entire vocabulary. Storing every zero wastes enormous amounts of memory.
+Let **K** = number of non-zero entries, **R×C** = matrix dimensions.
 
-The naive approach for a 10-sentence corpus with 100 unique words:
+| Method | Formula | This corpus (R=10, C=33, K=60) |
+|---|---|---|
+| Dense `int` matrix (naive) | `4 × R × C` | **4,000 bytes** |
+| Linked list nodes | `~16K` | **~960 bytes** |
+| COO triplets, `int` | `12K` | **720 bytes** |
+| CSR, `int` | `4K + 4K + 4R` | **520 bytes** |
+| COO triplets, `char` | `3K` | **180 bytes** |
+| **Bitmap + vault (this)** | **`R×C/8 + K`** | **102 bytes** ✅ |
 
-```
-10 rows × 100 columns × 4 bytes per int = 4,000 bytes
-```
+Every other sparse format stores *where* a value lives. This one doesn't. The **position of a set bit is the coordinate** — so the row and column indices cost literally zero bytes.
 
-Most of that is zeros. The goal: store only what matters.
+> ⚠️ **Honest note:** the shipped code reports **185 bytes**, not 102, because the bitmap is currently provisioned for `MAX_WORDS = 100` while the corpus only produces 33 unique words. Sizing the bitmap to the actual vocabulary (`10 × 33 / 8 = 42 bytes`) drops it to **102 bytes**. See [Known Limitations](#known-limitations). I'd rather report the number the program actually prints than a flattering one.
 
 ---
 
-## The Approach: Bitmap + Dynamic Vault
+## Why This Beats COO — The Density Rule
 
-This solution goes beyond the three methods suggested in the assignment (triplet array, linked list, hybrid row-wise). It borrows an idea from database indexing and compression — a **presence bitmap** paired with a **tightly packed value array**.
+COO (Coordinate List) is the standard sparse format. Even in its most aggressive form — every field crushed down to a single `unsigned char` — it must store **three bytes per non-zero entry**: row, column, and value. That floor is unavoidable, because COO has no way to know *where* a value belongs without writing the coordinates down.
 
-The design has two components:
+This implementation stores **one byte per entry** (the value alone) plus a **fixed** `R×C/8` bitmap.
 
-### 1. The Bitmap (`unsigned char bitmap[125]`)
+So the crossover is a clean inequality:
 
-The full matrix has `10 × 100 = 1000` positions. Instead of storing a value at every position, a single bit is used to record whether that position is non-zero or not.
+```
+     R×C/8 + K   <   3K
+⟺    R×C/8       <   2K
+⟺    K / (R×C)   >   1/16
+```
 
-- `1000 bits ÷ 8 bits per byte = 125 bytes`
-- Bit at position `(row * MAX_WORDS + col)` is `1` if that word appears in that sentence, `0` if not
-- Two macros handle all bit manipulation cleanly:
+> ### **This approach beats COO whenever matrix density exceeds 6.25%.**
+
+That's the whole result. Below 6.25% density the bitmap's fixed cost dominates and COO wins. Above it, the bitmap amortizes and this pulls away — permanently, because it scales at **1 byte per entry** while COO scales at **3**.
+
+**This corpus sits at 18.2% density** (60 non-zeros out of 330 cells), comfortably past the threshold.
+
+And the gap compounds as the corpus grows — the bitmap is a one-time cost, the vault is not:
+
+| K (non-zeros) | COO (`char`) | Bitmap + Vault | Saving |
+|---|---|---|---|
+| 60 | 180 B | 102 B | 43% |
+| 200 | 600 B | 242 B | 60% |
+| 500 | 1,500 B | 542 B | 64% |
+| 1,000 | 3,000 B | 1,042 B | 65% |
+
+Asymptotically this approaches a **3× advantage over the best possible COO**, and a **12× advantage over textbook COO**.
+
+---
+
+## How It Works
+
+Two structures, that's it.
+
+### 1. The Bitmap — `unsigned char bitmap[125]`
+
+The matrix has `10 × 100 = 1000` cells. Instead of a value per cell, store **one bit** per cell: `1` if non-zero, `0` if not.
+
+```
+1000 cells ÷ 8 bits per byte = 125 bytes
+```
+
+Bit `i` corresponds to flat position `i = row × MAX_WORDS + col`. Two macros do all the work:
 
 ```c
 #define SET_BIT(map, pos) (map[(pos) / 8] |= (1 << ((pos) % 8)))
-#define GET_BIT(map, pos) (map[(pos) / 8] & (1 << ((pos) % 8)))
+#define GET_BIT(map, pos) (map[(pos) / 8] &  (1 << ((pos) % 8)))
 ```
 
-### 2. The Value Vault (`unsigned char *sparseValues`)
+`pos / 8` finds the byte, `pos % 8` finds the bit inside it.
 
-Rather than a fixed-size array, the vault is allocated with **exactly** as many bytes as there are non-zero entries — no more, no less.
+### 2. The Vault — `unsigned char *sparseValues`
 
-- Each frequency value fits in one `unsigned char` (1 byte), since no word appears more than 255 times in a sentence
-- The vault is allocated via `malloc(nonZeroCount)` after scanning the temporary matrix
-- Words in the same matrix are stored at `int` (4 bytes each) in the naive version; here each value costs just **1 byte**
+A dense, gap-free array holding **only the non-zero values**, in row-major order. Allocated with `malloc(nonZeroCount)` *after* the exact count is known — so it is provably zero-waste. Not one spare byte.
 
-### How Retrieval Works
+### Retrieval — a Rank Query
 
-To look up `matrix[row][col]`:
+To read `matrix[r][c]`:
 
-1. Compute the flat position: `pos = row * MAX_WORDS + col`
-2. Check the bitmap at `pos` — if the bit is `0`, return `0` immediately (no search needed)
-3. If the bit is `1`, count how many `1`-bits exist before `pos` in the bitmap
-4. That count is the index into `sparseValues` — return `sparseValues[count]`
+```c
+int pos = r * MAX_WORDS + c;
 
-This is essentially a **rank query** on the bitmap, a technique used in succinct data structures.
+if (!GET_BIT(bitmap, pos)) return 0;   // ← O(1) rejection, no search
+
+int count = 0;
+for (int i = 0; i < pos; i++)          // ← rank: how many 1s came before?
+    if (GET_BIT(bitmap, i)) count++;
+
+return sparseValues[count];            // ← that rank IS the vault index
+```
+
+The number of set bits before position `pos` is exactly how many values were packed into the vault before this one. So **rank = vault index**. The coordinates were never stored; they were *recomputed* from the bitmap's geometry.
+
+This is [Jacobson's rank](https://en.wikipedia.org/wiki/Succinct_data_structure) (1989), the foundation of succinct data structures.
+
+---
+
+## `unsigned char` Over `int` — 4× on Every Value
+
+The naive matrix spends 4 bytes on an `int` to store a frequency that is almost always `1` or `2`. The vault uses `unsigned char` — 1 byte, range 0–255 — which is more than sufficient for word counts within a single sentence.
+
+```
+naive : 4 bytes/value
+vault : 1 byte/value      → 4× reduction, before the bitmap even helps
+```
+
+This stacks with the bitmap: zeros are eliminated *and* the survivors cost a quarter as much. It also keeps types consistent — the bitmap is `unsigned char` too.
 
 ---
 
 ## The Build Pipeline
 
-The program never holds a full dense matrix in memory longer than necessary. The lifecycle is:
+The dense matrix exists only as scaffolding, and is demolished before the program does any real work.
 
 ```
-Text input
-    ↓
-calloc() a temporary 1D grid (4,000 bytes) — acts as a 2D matrix
-    ↓
-Tokenize sentences → populate word frequencies into the grid
-    ↓
-compressMatrix():
-    → scan grid → count non-zero entries
-    → malloc() sparseValues (exactly nonZeroCount bytes)
-    → SET_BIT for every non-zero position
-    → store frequency in sparseValues vault
-    ↓
-free() the temporary 4,000-byte grid  ← it's gone at this point
-    ↓
-Program runs entirely on ~185 bytes from here on
+  text corpus
+       │
+       ▼
+  calloc()  ─────────►  temp grid, 4,000 bytes (zero-filled)
+       │
+       ▼
+  tokenize + count frequencies into grid
+       │
+       ▼
+  compressMatrix()
+       ├─ scan grid → count non-zeros → K
+       ├─ malloc(K) → vault sized exactly, zero waste
+       ├─ SET_BIT for every non-zero position
+       └─ copy each value into the vault
+       │
+       ▼
+  free(tempMatrix)  ◄── the 4,000 bytes are GONE
+       │
+       ▼
+  program now runs on 185 bytes, permanently
 ```
 
-The temporary grid exists only during setup and is immediately destroyed after compression. The running program never touches 4,000 bytes again.
+`freeSparseData()` releases the vault at exit. No leaks.
 
 ---
 
-## `unsigned char` Instead of `int` — A Deliberate Choice
+## Prior Art — What This Actually Is
 
-The naive matrix stores every frequency as an `int` — 4 bytes per value, even though the actual number stored is almost always `1` or `2`. That's up to 3 bytes of wasted space *per entry*, every single time.
+I want to be straight about this: **I did not invent this.** I arrived at it independently while trying to beat the assignment's suggested approaches, and only afterwards found out it's a well-established production technique. That's arguably the more interesting outcome.
 
-The vault uses `unsigned char` instead, which is exactly 1 byte and can hold values from `0` to `255`. For a word-frequency matrix built from sentences, no word realistically appears more than 255 times in a single sentence — so nothing is lost, and you get a **4× size reduction on every stored value**:
+The bitmap-plus-packed-values layout is, in essence:
 
-```
-Naive:  each frequency = int  = 4 bytes
-Vault:  each frequency = char = 1 byte
-```
+- **Apache Arrow** — validity bitmaps sit beside a packed values buffer; nulls cost 1 bit, exactly as here
+- **Apache Parquet** — definition levels encode presence separately from data
+- **Roaring Bitmap** — bitmap containers for dense chunks, used by Lucene, Druid, InfluxDB
+- **Succinct data structures** — Jacobson's rank/select, RRR encoding, wavelet trees
+- **Bitmap indexes** — standard in column-store databases for low-cardinality columns
 
-This compounds with the bitmap savings. Not only are zeros eliminated entirely, but the non-zero values themselves are stored at a quarter of the original cost. The two optimizations together are what push the total from 4,000 bytes down to ~185.
-
-It also fits naturally with the bitmap design — `unsigned char` is the same type used for the bitmap array itself, keeping the data types consistent and the code clean.
-
----
-
-## Memory Breakdown
-
-| Component | Size |
-|---|---|
-| Naive dense matrix | 4,000 bytes |
-| Bitmap | 125 bytes |
-| Value vault (exact, no waste) | ~60 bytes (depends on corpus) |
-| **Total compressed** | **~185 bytes** |
-| **Savings** | **~95%** |
-
-The vault size is zero-waste by design — `malloc` is called only after the exact count of non-zero entries is known.
+So: not novel. But the fact that a from-scratch attempt to outperform COO converges on the exact design used by columnar databases suggests the idea is a genuine local optimum, not a trick.
 
 ---
 
-## File Structure
+## Known Limitations
 
-```
-.
-├── sparse_utils.h   # Definitions, macros, extern declarations — do not edit
-├── sparse_utils.c   # Core engine: text parsing, matrix build, compress, retrieve
-└── main.c           # Display logic and program entry point
-```
+Being honest about the tradeoffs, because they're real:
 
-### `sparse_utils.h`
-Defines the constants, the bitmap and vault variables, and the two bit-manipulation macros. The `#ifndef` header guard prevents double-inclusion during compilation.
+**1. Lookups are O(n), not O(1).**
+`getSparseValue()` performs a linear scan to compute rank, so a single read costs O(pos) and printing the whole matrix is O((R×C)²). Dense arrays are O(1). This is the price paid for storing no indices — and it is **solvable**: real succinct structures precompute cumulative popcounts every 64 bits ("rank superblocks"), restoring **O(1) lookup** at ~3% extra space. That's the natural next step.
 
-### `sparse_utils.c`
-Contains all the logic:
-- `buildMatrix()` — tokenizes text, builds temporary grid, calls `compressMatrix()`
-- `compressMatrix()` — scans grid, allocates exact vault, fills bitmap, frees grid
-- `getSparseValue(r, c)` — bitmap lookup + rank count for retrieval
-- `freeSparseData()` — cleans up dynamic memory at program end
+**2. The bitmap is over-provisioned.**
+It's sized for `MAX_WORDS = 100`, but the corpus yields 33 unique words. 67 columns of bitmap are pure padding. Sizing it to `lineCount × wordCount` after tokenization takes it from **125 → 42 bytes**, and total from **185 → 102 bytes**.
 
-### `main.c`
-Calls `buildMatrix()`, then `printAll()` to display the original text, vocabulary index, and the compressed matrix (zeros shown as `.` for readability), followed by the memory comparison.
+**3. Values are capped at 255.**
+`unsigned char` overflows above 255 occurrences of one word in one sentence. Fine for sentence-level NLP; not fine in general.
+
+**4. Below 6.25% density, COO wins.** See the density rule above. This is not a universal victory, and shouldn't be sold as one.
+
+**5. It's immutable once built.** Inserting a new non-zero would require shifting the entire vault. Linked lists handle dynamic updates far better — that's their actual advantage, and this design gives it up.
 
 ---
 
-## Build and Run
+## Build & Run
 
 ```bash
 gcc main.c sparse_utils.c -o sparse_matrix_demo
 ./sparse_matrix_demo
 ```
 
-Adding more sentences to the `lines` array in `sparse_utils.c` will automatically update the vocabulary and recompress — no other changes needed.
+Add sentences to the `lines` array in `sparse_utils.c` — the vocabulary and compression update automatically.
 
----
-
-## Sample Output
+### Output
 
 ```
---- Original Text ---
-[0] data structures are fun and data is powerful
-[1] algorithms and data structures are important
-...
-
 --- Vocabulary Index ---
-0: data  1: structures  2: are  3: fun  ...
+0: data  1: structures  2: are  3: fun  4: and  5: is  6: powerful  ...  32: hand
 
 --- Compressed Sparse Matrix (Frequencies) ---
-2 1 1 1 1 1 . . . . ...
-. 1 1 . 1 . 1 . . . ...
+2 1 1 1 1 1 1 . . . . . . . . . . . . . . . . . . . . . . . . . .
+1 1 1 . 1 . . 1 1 . . . . . . . . . . . . . . . . . . . . . . . .
+1 1 . . 1 . . . . 1 1 1 1 . . . . . . . . . . . . . . . . . . . .
+3 . . . . . . . . . . . . 1 . . . . . . . . 1 1 . . . . . . . . .
 ...
 
-Memory usage
-Original size  : 4000 bytes
-Bitmap         :  125 bytes
-Vault          :   60 bytes (0 waste)
-Total          :  185 bytes
+                 Memory usage
+Original size     : 4000 bytes
+Bitmap            :  125 bytes
+Vault             :   60 bytes (0 waste)
+Total Memory Used :  185 bytes
+```
+
+Every `.` is a byte that was never allocated.
+
+---
+
+## What Was Given vs What Was Built
+
+The assignment shipped starter code. To be transparent about authorship:
+
+**Provided:** the text corpus, the `findWord()` / `addWord()` vocabulary helpers, a `buildMatrix()` that filled a dense `int matrix[10][100]`, and a `printAll()` that read from it directly. No compression of any kind.
+
+**Written from scratch:**
+
+| Component | File |
+|---|---|
+| `bitmap[]` array + `bitmapSize` | `sparse_utils.h` |
+| `SET_BIT` / `GET_BIT` macros | `sparse_utils.h` |
+| `sparseValues` vault pointer + `nonZeroCount` | `sparse_utils.h` |
+| `compressMatrix()` — scan, allocate, pack, free | `sparse_utils.c` |
+| `getSparseValue()` — rank-query retrieval | `sparse_utils.c` |
+| `freeSparseData()` — leak-free teardown | `sparse_utils.c` |
+| `buildMatrix()` rewritten around `calloc`/`free` | `sparse_utils.c` |
+| `main.c` rewritten to read via `getSparseValue()` + report memory | `main.c` |
+
+The dense matrix declaration was **deleted entirely**. It no longer exists in the final program.
+
+---
+
+## Files
+
+```
+├── sparse_utils.h   # constants, extern decls, bit macros
+├── sparse_utils.c   # tokenizer, compressor, rank retrieval, cleanup
+└── main.c           # display + memory reporting
 ```
 
 ---
 
-## Why This Is Interesting
+## Concepts
 
-The assignment suggested three approaches: triplet arrays, linked lists, or a hybrid row-wise method. Each of those still stores the row and column index alongside every value — triplets alone cost `3 × 4 bytes = 12 bytes per non-zero entry`.
-
-This bitmap approach eliminates the need to store row/column indices at all. The position of a bit in the bitmap *is* the index. The vault stores only raw values, and the rank of a set bit tells you exactly where in the vault to look. It is a form of **implicit indexing**.
-
-The technique is related to succinct data structures used in compressed full-text search indexes and columnar databases — applied here to a simple NLP word-frequency problem from a DSA course.
+Bit manipulation · succinct data structures · rank queries · dynamic memory (`malloc`/`calloc`/`free`) with zero over-allocation · sparse matrix formats (COO/CSR) · asymptotic space analysis · modular C with `extern` linkage
 
 ---
 
-## Concepts Demonstrated
-
-- Bit manipulation (`|=`, `&`, `<<`, byte/bit addressing)
-- Dynamic memory allocation (`malloc`, `calloc`, `free`) with zero over-allocation
-- Modular C programming with header files and `extern`
-- Sparse matrix theory and its real-world motivation in NLP
-- Implicit indexing via bitmap rank queries
-- Memory lifecycle management (build → compress → free → operate)
-
----
-
-*Built as part of a Data Structures and Algorithms course. The assignment asked for less; this does more with less.*
+<sub>Built for a Data Structures & Algorithms course. The brief said "store fewer zeros." This stores none of them, and none of the coordinates either.</sub>
